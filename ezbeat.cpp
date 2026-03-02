@@ -1,3 +1,11 @@
+/*
+ * EzBeat- C++ Implementation
+ * Copyright (c) 2026 hotdogdevourer
+ *
+ * Licensed under the MIT License.
+ * See the LICENSE file in the project root for full license information.
+ */
+
 #include <iostream>
 #include <fstream>
 #include <vector>
