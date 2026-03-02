@@ -1,0 +1,397 @@
+#include <iostream>
+#include <fstream>
+#include <vector>
+#include <string>
+#include <cmath>
+#include <cstdint>
+#include <random>
+#include <sstream>
+#include <algorithm>
+#include <iomanip>
+
+struct Config {
+    std::string output_file = "daisy.wav";
+    std::string input_file = "";
+    bool demo = false;
+    std::string type = "clean";
+    std::string mode = "fade";
+};
+
+const int SAMPLERATE = 4000;
+const double QUARTER = 0.180;
+const double A440 = 440.0;
+
+const std::vector<int> DAISY_P = {
+    74, 71, 67, 62, 64, 66, 67, 64, 67, 62,
+    69, 74, 71, 67, 64, 66, 67, 69, 71, 69,
+    71, 72, 71, 69, 74, 71, 69, 67, 69, 71, 67, 64, 67, 64, 62,
+    62, 67, 71, 69, 62, 67, 71, 69, 71, 72, 74, 71, 67, 69, 62, 67
+};
+
+const std::vector<int> DAISY_T_RAW = {
+    3,  3,  3,  3,  1,  1,  1,  2,  1,  6,
+    3,  3,  3,  3,  1,  1,  1,  2,  1,  6,
+    1,  1,  1,  1,  2,  1,  1,  4,  1,  2,  1,  2,  1,  1,  5,
+    1,  2,  1,  2,  1,  2,  1,  1,  1,  1,  1,  1,  1,  2,  1,  6
+};
+
+bool parse_input_file(const std::string& filename, std::vector<int>& pitches, std::vector<double>& times) {
+    std::ifstream file(filename);
+    if (!file.is_open()) {
+        std::cerr << "Error: Could not open input file " << filename << "\n";
+        return false;
+    }
+    std::string line;
+    bool found_pitches = false;
+    bool found_times = false;
+    while (std::getline(file, line)) {
+        if (line.rfind("pitches:", 0) == 0) {
+            std::string data = line.substr(8);
+            std::stringstream ss(data);
+            std::string item;
+            while (std::getline(ss, item, ',')) {
+                try {
+                    pitches.push_back(std::stoi(item));
+                } catch (...) {
+                    continue;
+                }
+            }
+            found_pitches = true;
+        } else if (line.rfind("time:", 0) == 0) {
+            std::string data = line.substr(5);
+            std::stringstream ss(data);
+            std::string item;
+            while (std::getline(ss, item, ',')) {
+                try {
+                    times.push_back(std::stod(item));
+                } catch (...) {
+                    continue;
+                }
+            }
+            found_times = true;
+        }
+    }
+    if (!found_pitches || !found_times || pitches.size() != times.size()) {
+        std::cerr << "Error: Invalid input file format.\n";
+        return false;
+    }
+    return true;
+}
+
+std::vector<double> generate_tone(double frequency, double duration, int samplerate, const Config& config, std::mt19937& gen) {
+    int min_samples = 8;
+    int n_samples = std::max(static_cast<int>(duration * samplerate), min_samples);
+    std::vector<double> t(n_samples);
+    for (int i = 0; i < n_samples; ++i) {
+        t[i] = static_cast<double>(i) / samplerate;
+    }
+
+    std::vector<double> wave(n_samples);
+    if (config.type == "nostalgic") {
+        std::normal_distribution<double> dist(0.0, 1.0);
+        std::vector<double> jitter(n_samples);
+        std::vector<double> instant_freq(n_samples);
+        std::vector<double> phase(n_samples);
+        
+        for (int i = 0; i < n_samples; ++i) {
+            jitter[i] = 0.035 * dist(gen);
+            double pwm_lfo = 0.25 * std::sin(2.0 * 3.14159265358979323846 * 0.8 * t[i]);
+            double pulse_width = 0.5 + pwm_lfo;
+            double vibrato = 1.8 * std::sin(2.0 * 3.14159265358979323846 * 5.0 * t[i]);
+            double drift = 0.3 * std::sin(2.0 * 3.14159265358979323846 * 0.1 * t[i] + dist(gen));
+            instant_freq[i] = frequency + vibrato + jitter[i] + drift;
+        }
+
+        double cum_phase = 0.0;
+        for (int i = 0; i < n_samples; ++i) {
+            cum_phase += instant_freq[i];
+            phase[i] = 2.0 * 3.14159265358979323846 * cum_phase / samplerate;
+        }
+
+        std::vector<double> raw_wave(n_samples);
+        for (int i = 0; i < n_samples; ++i) {
+            raw_wave[i] = std::sin(phase[i]);
+        }
+
+        std::vector<double> alias(n_samples);
+        for (int i = 0; i < n_samples; ++i) {
+            alias[i] = std::sin(2.0 * 3.14159265358979323846 * phase[i] * 0.47);
+        }
+
+        for (int i = 0; i < n_samples; ++i) {
+            raw_wave[i] = 0.85 * raw_wave[i] + 0.15 * alias[i];
+        }
+
+        std::vector<double> kernel = {0.7, 0.3};
+        std::vector<double> conv_raw(n_samples, 0.0);
+        for (int i = 0; i < n_samples; ++i) {
+            for (size_t k = 0; k < kernel.size(); ++k) {
+                int idx = i - static_cast<int>(kernel.size()) / 2 + static_cast<int>(k);
+                if (idx >= 0 && idx < n_samples) {
+                    conv_raw[i] += raw_wave[idx] * kernel[k];
+                }
+            }
+        }
+        raw_wave = conv_raw;
+
+        std::vector<double> pwm_wave(n_samples);
+        for (int i = 0; i < n_samples; ++i) {
+            double pwm_lfo = 0.25 * std::sin(2.0 * 3.14159265358979323846 * 0.8 * t[i]);
+            double pulse_width = 0.5 + pwm_lfo;
+            if (raw_wave[i] > (2.0 * pulse_width - 1.0)) {
+                pwm_wave[i] = 1.0;
+            } else {
+                pwm_wave[i] = -1.0;
+            }
+        }
+
+        int levels = 64;
+        for (int i = 0; i < n_samples; ++i) {
+            pwm_wave[i] = std::round(pwm_wave[i] * levels) / levels;
+        }
+
+        for (int i = 0; i < n_samples; ++i) {
+            pwm_wave[i] += 0.04 * std::sin(2.0 * 3.14159265358979323846 * phase[i] * 0.73);
+            pwm_wave[i] += 0.02 * std::sin(2.0 * 3.14159265358979323846 * phase[i] * 1.31);
+        }
+
+        std::vector<double> kernel2 = {0.8, 0.2};
+        std::vector<double> conv_pwm(n_samples, 0.0);
+        for (int i = 0; i < n_samples; ++i) {
+            for (size_t k = 0; k < kernel2.size(); ++k) {
+                int idx = i - static_cast<int>(kernel2.size()) / 2 + static_cast<int>(k);
+                if (idx >= 0 && idx < n_samples) {
+                    conv_pwm[i] += pwm_wave[idx] * kernel2[k];
+                }
+            }
+        }
+        pwm_wave = conv_pwm;
+
+        double sum = 0.0;
+        for (double v : pwm_wave) sum += v;
+        double mean = sum / n_samples;
+        for (int i = 0; i < n_samples; ++i) {
+            pwm_wave[i] -= mean;
+        }
+
+        for (int i = 0; i < n_samples; ++i) {
+            pwm_wave[i] += 0.1 * dist(gen);
+        }
+        wave = pwm_wave;
+
+    } else {
+        for (int i = 0; i < n_samples; ++i) {
+            wave[i] = std::sin(2.0 * 3.14159265358979323846 * frequency * t[i]);
+        }
+    }
+
+    if (config.mode == "fade") {
+        for (int i = 0; i < n_samples; ++i) {
+            wave[i] *= std::exp(-2.0 / duration * t[i]);
+        }
+    }
+
+    return wave;
+}
+
+std::vector<double> convolve_same(const std::vector<double>& signal, const std::vector<double>& kernel) {
+    std::vector<double> result(signal.size(), 0.0);
+    int half_k = static_cast<int>(kernel.size()) / 2;
+    for (size_t i = 0; i < signal.size(); ++i) {
+        double sum = 0.0;
+        for (size_t k = 0; k < kernel.size(); ++k) {
+            int idx = static_cast<int>(i) - half_k + static_cast<int>(k);
+            if (idx >= 0 && idx < static_cast<int>(signal.size())) {
+                sum += signal[idx] * kernel[k];
+            }
+        }
+        result[i] = sum;
+    }
+    return result;
+}
+
+void write_wav_header(std::ofstream& file, size_t num_samples, int samplerate) {
+    int bits_per_sample = 16;
+    int byte_rate = samplerate * 1 * (bits_per_sample / 8);
+    int block_align = 1 * (bits_per_sample / 8);
+    int data_size = num_samples * (bits_per_sample / 8);
+    int file_size = 36 + data_size;
+
+    file.write("RIFF", 4);
+    int fs = file_size;
+    file.write(reinterpret_cast<char*>(&fs), 4);
+    file.write("WAVE", 4);
+    file.write("fmt ", 4);
+    int fmt_size = 16;
+    file.write(reinterpret_cast<char*>(&fmt_size), 4);
+    int16_t audio_format = 1;
+    file.write(reinterpret_cast<char*>(&audio_format), 2);
+    int16_t num_channels = 1;
+    file.write(reinterpret_cast<char*>(&num_channels), 2);
+    int sr = samplerate;
+    file.write(reinterpret_cast<char*>(&sr), 4);
+    int br = byte_rate;
+    file.write(reinterpret_cast<char*>(&br), 4);
+    int16_t ba = block_align;
+    file.write(reinterpret_cast<char*>(&ba), 2);
+    int16_t bps = bits_per_sample;
+    file.write(reinterpret_cast<char*>(&bps), 2);
+    file.write("data", 4);
+    int ds = data_size;
+    file.write(reinterpret_cast<char*>(&ds), 4);
+}
+
+void write_int16_le(std::ofstream& file, int16_t value) {
+    file.write(reinterpret_cast<char*>(&value), 2);
+}
+
+int main(int argc, char* argv[]) {
+    if (argc == 1) {
+        std::cerr << "Error: No arguments provided.\n";
+        std::cerr << "Use -h for help.\n";
+        return 1;
+    }
+
+    Config config;
+    bool show_help = false;
+    bool seen_demo = false;
+    bool seen_input = false;
+
+    for (int i = 1; i < argc; ++i) {
+        std::string arg = argv[i];
+
+        if (arg == "-h") {
+            show_help = true;
+        }
+        else if (arg == "-demo") {
+            config.demo = true;
+            seen_demo = true;
+        }
+        else if (arg.rfind("-o=", 0) == 0) {
+            config.output_file = arg.substr(3);
+        }
+        else if (arg.rfind("-i=", 0) == 0) {
+            config.input_file = arg.substr(3);
+            seen_input = true;
+        }
+        else if (arg.rfind("-type=", 0) == 0) {
+            config.type = arg.substr(6);
+        }
+        else if (arg.rfind("-mode=", 0) == 0) {
+            config.mode = arg.substr(6);
+        }
+        else {
+            std::cerr << "Error: Unknown argument '" << arg << "'\n";
+            return 1;
+        }
+    }
+
+    if (show_help) {
+        std::cout << "Usage: " << argv[0]
+                  << " -o=output.wav (-i=file.ext | -demo) "
+                  << "[-type=clean|nostalgic] [-mode=fade|nfade]\n\n";
+
+        std::cout << "Required (one of):\n";
+        std::cout << "  -i=<file>   Input file with 'pitches:' and 'time:'\n";
+        std::cout << "  -demo       Run demo mode\n\n";
+
+        std::cout << "Optional:\n";
+        std::cout << "  -o=<file>     Output WAV file (default: daisy.wav)\n";
+        std::cout << "  -type=<type>  clean or nostalgic\n";
+        std::cout << "  -mode=<mode>  fade or nfade\n";
+        std::cout << "  -h            Show this help\n";
+        return 0;
+    }
+
+    if (!seen_demo && !seen_input) {
+        std::cerr << "Error: You must specify either -demo or -i=<file>\n";
+        return 1;
+    }
+
+    if (config.type != "clean" && config.type != "nostalgic") {
+        std::cerr << "Error: -type must be 'clean' or 'nostalgic'\n";
+        return 1;
+    }
+
+    if (config.mode != "fade" && config.mode != "nfade") {
+        std::cerr << "Error: -mode must be 'fade' or 'nfade'\n";
+        return 1;
+    }
+
+    if (seen_demo && seen_input) {
+        std::cerr << "Error: Cannot use -demo and -i together.\n";
+        return 1;
+    }
+
+    if (config.demo) {
+        std::cout << "=== EzBeat Synthesizer ===\n";
+        std::cout << "Output: " << config.output_file << "\n";
+        std::cout << "Type: " << config.type << "\n";
+        std::cout << "Mode: " << config.mode << "\n";
+        std::cout << "Mode: Demo (no input file)\n";
+        std::cout << "===========================\n";
+    }
+
+    std::random_device rd;
+    std::mt19937 gen(rd());
+
+    std::vector<int> pitches;
+    std::vector<double> times;
+
+    if (seen_input) {
+        if (!parse_input_file(config.input_file, pitches, times)) {
+            return 1;
+        }
+        for (double& t : times) {
+            t *= QUARTER;
+        }
+    }
+    else {
+        pitches = DAISY_P;
+        for (double t : DAISY_T_RAW) {
+            times.push_back(t * QUARTER);
+        }
+    }
+
+    std::vector<double> signal;
+    signal.push_back(0.0);
+
+    for (size_t i = 0; i < pitches.size(); ++i) {
+        double frequency = std::pow(2.0, (pitches[i] - 69.0) / 12.0) * A440;
+        std::vector<double> tone =
+            generate_tone(frequency, times[i], SAMPLERATE, config, gen);
+        signal.insert(signal.end(), tone.begin(), tone.end());
+    }
+
+    if (config.type == "nostalgic") {
+        std::vector<double> kernel = {0.25, 0.25, 0.25, 0.25};
+        signal = convolve_same(signal, kernel);
+    }
+
+    double scale = std::pow(2.0, 15.0) - 1.0;
+    std::vector<int16_t> int_signal;
+    int_signal.reserve(signal.size());
+
+    for (double s : signal) {
+        double scaled = std::max(-32768.0,
+                         std::min(32767.0, s * scale));
+        int_signal.push_back(static_cast<int16_t>(scaled));
+    }
+
+    std::ofstream outfile(config.output_file, std::ios::binary);
+    if (!outfile) {
+        std::cerr << "Error: Could not open file "
+                  << config.output_file << "\n";
+        return 1;
+    }
+
+    write_wav_header(outfile, int_signal.size(), SAMPLERATE);
+    for (int16_t s : int_signal)
+        write_int16_le(outfile, s);
+
+    outfile.close();
+    std::cout << ".wav file written: "
+              << config.output_file << "\n";
+
+    return 0;
+}
