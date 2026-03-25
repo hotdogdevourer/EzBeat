@@ -42,7 +42,7 @@ const std::vector<int> DAISY_P = {
     62, 67, 71, 69, 62, 67, 71, 69, 71, 72, 74, 71, 67, 69, 62, 67
 };
 
-const std::vector<int> DAISY_T_RAW = {
+const std::vector<double> DAISY_T_RAW = {
     2.5,  2.5,  2.5,
     2.5,  2.5,  2.5,
     2.5,  2.5,  2.5,
